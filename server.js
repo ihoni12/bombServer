@@ -9,11 +9,9 @@ const COLS = 11;
 const MAX_PLAYERS = 4;
 const MIN_PLAYERS = 2;
 const WAIT_TIME_MS = 30000;
-const START_DELAY_MS = 3000;
 
 let waitingPlayers = [];
 let waitingTimer = null;
-let waitingStartedAt = null;
 
 function canHaveBox(x, y) {
   const isBorder = x === 0 || y === 0 || x === COLS - 1 || y === ROWS - 1;
@@ -79,7 +77,7 @@ function createMatch(sockets) {
   return {
     matchId: crypto.randomUUID(),
     serverNow,
-    startAt: serverNow + START_DELAY_MS,
+    startAt: serverNow + 3000,
     playersCount: sockets.length,
     playersByCorner: buildCornerPlayers(sockets),
     boxContents: createBoxContents(),
@@ -100,58 +98,27 @@ function sendJson(res, statusCode, data) {
 function handleHealth(req, res) {
   sendJson(res, 200, {
     ok: true,
-    message: "Servidor online funcionando correctamente.",
-    mode: "Socket.IO + WebRTC signaling",
-    waitingPlayers: waitingPlayers.length,
-    maxPlayers: MAX_PLAYERS,
-    minPlayers: MIN_PLAYERS,
+    message: "Servidor online funcionando",
+    mode: "socket.io + webrtc signaling",
   });
 }
 
-function getWaitingPayload(extra = {}) {
-  return {
-    playersWaiting: waitingPlayers.length,
-    playersCount: waitingPlayers.length,
-    maxPlayers: MAX_PLAYERS,
-    minPlayers: MIN_PLAYERS,
-    waitSeconds: WAIT_TIME_MS / 1000,
-    waitingStartedAt,
-    autoStartAt: waitingStartedAt ? waitingStartedAt + WAIT_TIME_MS : null,
-    message:
-      waitingPlayers.length >= MIN_PLAYERS
-        ? "Ya hay jugadores suficientes. La partida empezará pronto."
-        : "Esperando al menos 2 jugadores para comenzar.",
-    ...extra,
-  };
-}
-
-function emitWaitingRoomUpdate(extra = {}) {
-  io.emit("waiting-room-update", getWaitingPayload(extra));
-}
-
-function clearWaitingTimerIfNeeded() {
-  if (waitingPlayers.length === 0) {
-    if (waitingTimer) clearTimeout(waitingTimer);
-    waitingTimer = null;
-    waitingStartedAt = null;
-  }
-}
-
 function removeFromWaiting(socketId) {
-  const before = waitingPlayers.length;
   waitingPlayers = waitingPlayers.filter((s) => s.id !== socketId);
 
-  if (before !== waitingPlayers.length) {
-    clearWaitingTimerIfNeeded();
-    emitWaitingRoomUpdate();
+  if (waitingPlayers.length === 0 && waitingTimer) {
+    clearTimeout(waitingTimer);
+    waitingTimer = null;
   }
 }
 
 function startMatch(players) {
   if (players.length < MIN_PLAYERS) return;
 
-  if (waitingTimer) clearTimeout(waitingTimer);
-  waitingTimer = null;
+  if (waitingTimer) {
+    clearTimeout(waitingTimer);
+    waitingTimer = null;
+  }
 
   waitingPlayers = waitingPlayers.filter(
     (socket) => !players.some((p) => p.id === socket.id)
@@ -159,16 +126,6 @@ function startMatch(players) {
 
   const match = createMatch(players);
   const roomId = match.matchId;
-
-  players.forEach((player) => {
-    player.emit("match-starting", {
-      roomId,
-      playersCount: players.length,
-      maxPlayers: MAX_PLAYERS,
-      startAt: match.startAt,
-      message: "Partida encontrada. Preparando el inicio...",
-    });
-  });
 
   players.forEach((player, index) => {
     player.join(roomId);
@@ -182,14 +139,6 @@ function startMatch(players) {
   });
 
   console.log(`Partida creada: ${roomId} con ${players.length} jugadores`);
-
-  if (waitingPlayers.length > 0) {
-    waitingStartedAt = Date.now();
-    emitWaitingRoomUpdate();
-    startWaitingTimer();
-  } else {
-    waitingStartedAt = null;
-  }
 }
 
 function tryStartByMaxPlayers() {
@@ -200,25 +149,23 @@ function tryStartByMaxPlayers() {
 }
 
 function startWaitingTimer() {
-  if (waitingTimer || waitingPlayers.length === 0) return;
-  if (!waitingStartedAt) waitingStartedAt = Date.now();
+  if (waitingTimer) return;
 
   waitingTimer = setTimeout(() => {
-    waitingTimer = null;
-
     if (waitingPlayers.length >= MIN_PLAYERS) {
       const players = waitingPlayers.slice(0, MAX_PLAYERS);
       startMatch(players);
-      return;
+    } else {
+      waitingPlayers.forEach((socket) => {
+        socket.emit("waiting-for-player", {
+          playersWaiting: waitingPlayers.length,
+          message: "Esperando mínimo 2 jugadores...",
+        });
+      });
+
+      waitingTimer = null;
+      startWaitingTimer();
     }
-
-    waitingPlayers.forEach((socket) => {
-      socket.emit("waiting-for-player", getWaitingPayload());
-    });
-
-    waitingStartedAt = Date.now();
-    emitWaitingRoomUpdate();
-    startWaitingTimer();
   }, WAIT_TIME_MS);
 }
 
@@ -228,7 +175,7 @@ const httpServer = http.createServer((req, res) => {
 
   return sendJson(res, 404, {
     ok: false,
-    error: "Ruta no encontrada. Este juego usa Socket.IO para las partidas online.",
+    error: "Ruta no encontrada. El juego usa Socket.IO.",
   });
 });
 
@@ -241,50 +188,49 @@ io.on("connection", (socket) => {
 
   socket.on("want-to-play", () => {
     const alreadyWaiting = waitingPlayers.some((s) => s.id === socket.id);
-    if (alreadyWaiting) {
-      socket.emit("waiting-for-player", getWaitingPayload());
-      return;
-    }
+    if (alreadyWaiting) return;
 
     waitingPlayers.push(socket);
-    if (!waitingStartedAt) waitingStartedAt = Date.now();
 
-    socket.emit("waiting-for-player", getWaitingPayload({
-      message: "Entraste a la sala de espera. Buscando jugadores...",
-    }));
+    socket.emit("waiting-for-player", {
+      playersWaiting: waitingPlayers.length,
+      maxPlayers: MAX_PLAYERS,
+      waitSeconds: WAIT_TIME_MS / 1000,
+    });
 
-    emitWaitingRoomUpdate();
-    console.log(`Sala de espera: ${waitingPlayers.length}/${MAX_PLAYERS}`);
+    io.emit("waiting-room-update", {
+      playersWaiting: waitingPlayers.length,
+      maxPlayers: MAX_PLAYERS,
+    });
+
+    console.log(`Esperando jugadores: ${waitingPlayers.length}/${MAX_PLAYERS}`);
 
     tryStartByMaxPlayers();
     startWaitingTimer();
   });
 
-  socket.on("cancel-waiting", () => {
-    removeFromWaiting(socket.id);
-    socket.emit("waiting-cancelled", {
-      ok: true,
-      message: "Saliste de la sala de espera.",
+  socket.on("webrtc-offer", ({ roomId, offer }) => {
+    socket.to(roomId).emit("webrtc-offer", {
+      from: socket.id,
+      offer,
     });
   });
 
-  socket.on("webrtc-offer", ({ roomId, offer }) => {
-    if (!roomId || !offer) return;
-    socket.to(roomId).emit("webrtc-offer", { from: socket.id, offer });
-  });
-
   socket.on("webrtc-answer", ({ roomId, answer }) => {
-    if (!roomId || !answer) return;
-    socket.to(roomId).emit("webrtc-answer", { from: socket.id, answer });
+    socket.to(roomId).emit("webrtc-answer", {
+      from: socket.id,
+      answer,
+    });
   });
 
   socket.on("webrtc-ice", ({ roomId, candidate }) => {
-    if (!roomId || !candidate) return;
-    socket.to(roomId).emit("webrtc-ice", { from: socket.id, candidate });
+    socket.to(roomId).emit("webrtc-ice", {
+      from: socket.id,
+      candidate,
+    });
   });
 
   socket.on("relay-input", ({ roomId, input }) => {
-    if (!roomId || !input) return;
     socket.to(roomId).emit("relay-input", { input });
   });
 
@@ -298,9 +244,16 @@ io.on("connection", (socket) => {
 
     for (const roomId of socket.rooms) {
       if (roomId !== socket.id) {
-        socket.to(roomId).emit("peer-disconnected", { socketId: socket.id });
+        socket.to(roomId).emit("peer-disconnected", {
+          socketId: socket.id,
+        });
       }
     }
+
+    io.emit("waiting-room-update", {
+      playersWaiting: waitingPlayers.length,
+      maxPlayers: MAX_PLAYERS,
+    });
 
     console.log("Jugador desconectado:", socket.id);
   });
