@@ -1,15 +1,3 @@
-/*
-ÍNDICE DE FUNCIONES - SERVIDOR ONLINE (server/server.js)
-01. canHaveBox: revisa si una celda puede tener caja.
-02. chooseRandomBoxContent: decide qué premio tiene una caja.
-03. createBoxContents: crea el array 2D random de cajas y premios.
-04. buildCornerPlayers: arma jugadores por esquina.
-05. createMatch: crea partida de 2 jugadores con cajas ya generadas.
-06. sendJson: responde JSON y agrega CORS.
-07. handleHealth: prueba si el servidor funciona.
-08. socket connection: empareja jugadores, manda configuración y hace signaling WebRTC.
-*/
-
 const http = require("http");
 const crypto = require("crypto");
 const { Server } = require("socket.io");
@@ -18,9 +6,15 @@ const PORT = process.env.PORT || 3001;
 const ROWS = 11;
 const COLS = 11;
 
-let waitingSocket = null;
+const MAX_PLAYERS = 4;
+const MIN_PLAYERS = 2;
+const WAIT_TIME_MS = 30000;
+const START_DELAY_MS = 3000;
 
-// FUNCIÓN 01: revisa si una celda puede tener caja rompible.
+let waitingPlayers = [];
+let waitingTimer = null;
+let waitingStartedAt = null;
+
 function canHaveBox(x, y) {
   const isBorder = x === 0 || y === 0 || x === COLS - 1 || y === ROWS - 1;
   const isFixedWall = x % 2 === 0 && y % 2 === 0;
@@ -33,7 +27,6 @@ function canHaveBox(x, y) {
   return !isBorder && !isFixedWall && !spawnSafe;
 }
 
-// FUNCIÓN 02: decide aleatoriamente qué tiene una caja por dentro.
 function chooseRandomBoxContent() {
   const roll = Math.random() * 100;
 
@@ -50,12 +43,12 @@ function chooseRandomBoxContent() {
   return "playerShot";
 }
 
-// FUNCIÓN 03: crea las cajas random UNA SOLA VEZ en el servidor.
 function createBoxContents() {
   const boxContents = [];
 
   for (let y = 0; y < ROWS; y++) {
     const row = [];
+
     for (let x = 0; x < COLS; x++) {
       if (!canHaveBox(x, y)) {
         row.push("nada");
@@ -65,13 +58,13 @@ function createBoxContents() {
       const hasBox = Math.random() < 0.68;
       row.push(hasBox ? chooseRandomBoxContent() : "nada");
     }
+
     boxContents.push(row);
   }
 
   return boxContents;
 }
 
-// FUNCIÓN 04: arma jugadores por esquina. Para probar online lo dejé en 2 jugadores.
 function buildCornerPlayers(sockets) {
   return sockets.map((socket, index) => ({
     corner: index,
@@ -80,19 +73,19 @@ function buildCornerPlayers(sockets) {
   }));
 }
 
-// FUNCIÓN 05: crea partida de 2 jugadores con la MISMA info para ambos.
 function createMatch(sockets) {
   const serverNow = Date.now();
+
   return {
     matchId: crypto.randomUUID(),
     serverNow,
-    startAt: serverNow + 3000,
+    startAt: serverNow + START_DELAY_MS,
+    playersCount: sockets.length,
     playersByCorner: buildCornerPlayers(sockets),
     boxContents: createBoxContents(),
   };
 }
 
-// FUNCIÓN 06: responde JSON simple.
 function sendJson(res, statusCode, data) {
   res.writeHead(statusCode, {
     "Content-Type": "application/json; charset=utf-8",
@@ -100,70 +93,215 @@ function sendJson(res, statusCode, data) {
     "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type",
   });
+
   res.end(JSON.stringify(data));
 }
 
-// FUNCIÓN 07: health check.
 function handleHealth(req, res) {
-  sendJson(res, 200, { ok: true, message: "Servidor online funcionando", mode: "socket.io + webrtc signaling" });
+  sendJson(res, 200, {
+    ok: true,
+    message: "Servidor online funcionando correctamente.",
+    mode: "Socket.IO + WebRTC signaling",
+    waitingPlayers: waitingPlayers.length,
+    maxPlayers: MAX_PLAYERS,
+    minPlayers: MIN_PLAYERS,
+  });
+}
+
+function getWaitingPayload(extra = {}) {
+  return {
+    playersWaiting: waitingPlayers.length,
+    playersCount: waitingPlayers.length,
+    maxPlayers: MAX_PLAYERS,
+    minPlayers: MIN_PLAYERS,
+    waitSeconds: WAIT_TIME_MS / 1000,
+    waitingStartedAt,
+    autoStartAt: waitingStartedAt ? waitingStartedAt + WAIT_TIME_MS : null,
+    message:
+      waitingPlayers.length >= MIN_PLAYERS
+        ? "Ya hay jugadores suficientes. La partida empezará pronto."
+        : "Esperando al menos 2 jugadores para comenzar.",
+    ...extra,
+  };
+}
+
+function emitWaitingRoomUpdate(extra = {}) {
+  io.emit("waiting-room-update", getWaitingPayload(extra));
+}
+
+function clearWaitingTimerIfNeeded() {
+  if (waitingPlayers.length === 0) {
+    if (waitingTimer) clearTimeout(waitingTimer);
+    waitingTimer = null;
+    waitingStartedAt = null;
+  }
+}
+
+function removeFromWaiting(socketId) {
+  const before = waitingPlayers.length;
+  waitingPlayers = waitingPlayers.filter((s) => s.id !== socketId);
+
+  if (before !== waitingPlayers.length) {
+    clearWaitingTimerIfNeeded();
+    emitWaitingRoomUpdate();
+  }
+}
+
+function startMatch(players) {
+  if (players.length < MIN_PLAYERS) return;
+
+  if (waitingTimer) clearTimeout(waitingTimer);
+  waitingTimer = null;
+
+  waitingPlayers = waitingPlayers.filter(
+    (socket) => !players.some((p) => p.id === socket.id)
+  );
+
+  const match = createMatch(players);
+  const roomId = match.matchId;
+
+  players.forEach((player) => {
+    player.emit("match-starting", {
+      roomId,
+      playersCount: players.length,
+      maxPlayers: MAX_PLAYERS,
+      startAt: match.startAt,
+      message: "Partida encontrada. Preparando el inicio...",
+    });
+  });
+
+  players.forEach((player, index) => {
+    player.join(roomId);
+
+    player.emit("match-found", {
+      ...match,
+      roomId,
+      localCorner: index,
+      shouldCreateOffer: index === 0,
+    });
+  });
+
+  console.log(`Partida creada: ${roomId} con ${players.length} jugadores`);
+
+  if (waitingPlayers.length > 0) {
+    waitingStartedAt = Date.now();
+    emitWaitingRoomUpdate();
+    startWaitingTimer();
+  } else {
+    waitingStartedAt = null;
+  }
+}
+
+function tryStartByMaxPlayers() {
+  if (waitingPlayers.length >= MAX_PLAYERS) {
+    const players = waitingPlayers.slice(0, MAX_PLAYERS);
+    startMatch(players);
+  }
+}
+
+function startWaitingTimer() {
+  if (waitingTimer || waitingPlayers.length === 0) return;
+  if (!waitingStartedAt) waitingStartedAt = Date.now();
+
+  waitingTimer = setTimeout(() => {
+    waitingTimer = null;
+
+    if (waitingPlayers.length >= MIN_PLAYERS) {
+      const players = waitingPlayers.slice(0, MAX_PLAYERS);
+      startMatch(players);
+      return;
+    }
+
+    waitingPlayers.forEach((socket) => {
+      socket.emit("waiting-for-player", getWaitingPayload());
+    });
+
+    waitingStartedAt = Date.now();
+    emitWaitingRoomUpdate();
+    startWaitingTimer();
+  }, WAIT_TIME_MS);
 }
 
 const httpServer = http.createServer((req, res) => {
   if (req.method === "OPTIONS") return sendJson(res, 200, { ok: true });
   if (req.method === "GET" && req.url === "/health") return handleHealth(req, res);
-  return sendJson(res, 404, { ok: false, error: "Ruta no encontrada. El juego usa Socket.IO." });
+
+  return sendJson(res, 404, {
+    ok: false,
+    error: "Ruta no encontrada. Este juego usa Socket.IO para las partidas online.",
+  });
 });
 
 const io = new Server(httpServer, {
   cors: { origin: "*", methods: ["GET", "POST"] },
 });
 
-// FUNCIÓN 08: Socket.IO empareja, manda cajas y pasa mensajes WebRTC.
 io.on("connection", (socket) => {
   console.log("Jugador conectado:", socket.id);
 
   socket.on("want-to-play", () => {
-    if (waitingSocket && waitingSocket.connected && waitingSocket.id !== socket.id) {
-      const playerA = waitingSocket;
-      const playerB = socket;
-      waitingSocket = null;
-
-      const match = createMatch([playerA, playerB]);
-      const roomId = match.matchId;
-
-      playerA.join(roomId);
-      playerB.join(roomId);
-
-      playerA.emit("match-found", { ...match, roomId, localCorner: 0, shouldCreateOffer: true });
-      playerB.emit("match-found", { ...match, roomId, localCorner: 1, shouldCreateOffer: false });
-
-      console.log("Partida creada:", roomId);
-    } else {
-      waitingSocket = socket;
-      socket.emit("waiting-for-player");
-      console.log("Esperando otro jugador...");
+    const alreadyWaiting = waitingPlayers.some((s) => s.id === socket.id);
+    if (alreadyWaiting) {
+      socket.emit("waiting-for-player", getWaitingPayload());
+      return;
     }
+
+    waitingPlayers.push(socket);
+    if (!waitingStartedAt) waitingStartedAt = Date.now();
+
+    socket.emit("waiting-for-player", getWaitingPayload({
+      message: "Entraste a la sala de espera. Buscando jugadores...",
+    }));
+
+    emitWaitingRoomUpdate();
+    console.log(`Sala de espera: ${waitingPlayers.length}/${MAX_PLAYERS}`);
+
+    tryStartByMaxPlayers();
+    startWaitingTimer();
   });
 
-  // Estos eventos NO son lógica del juego. Solo ayudan a abrir el canal P2P.
-  socket.on("webrtc-offer", ({ roomId, offer }) => socket.to(roomId).emit("webrtc-offer", { offer }));
-  socket.on("webrtc-answer", ({ roomId, answer }) => socket.to(roomId).emit("webrtc-answer", { answer }));
-  socket.on("webrtc-ice", ({ roomId, candidate }) => socket.to(roomId).emit("webrtc-ice", { candidate }));
+  socket.on("cancel-waiting", () => {
+    removeFromWaiting(socket.id);
+    socket.emit("waiting-cancelled", {
+      ok: true,
+      message: "Saliste de la sala de espera.",
+    });
+  });
 
-  // Fallback: si WebRTC falla, igual podemos reenviar inputs por el servidor.
-  socket.on("relay-input", ({ roomId, input }) => socket.to(roomId).emit("relay-input", { input }));
+  socket.on("webrtc-offer", ({ roomId, offer }) => {
+    if (!roomId || !offer) return;
+    socket.to(roomId).emit("webrtc-offer", { from: socket.id, offer });
+  });
 
-  // Mensajes de sincronización de estado: request/response para reconectar o recuperar partida.
+  socket.on("webrtc-answer", ({ roomId, answer }) => {
+    if (!roomId || !answer) return;
+    socket.to(roomId).emit("webrtc-answer", { from: socket.id, answer });
+  });
+
+  socket.on("webrtc-ice", ({ roomId, candidate }) => {
+    if (!roomId || !candidate) return;
+    socket.to(roomId).emit("webrtc-ice", { from: socket.id, candidate });
+  });
+
+  socket.on("relay-input", ({ roomId, input }) => {
+    if (!roomId || !input) return;
+    socket.to(roomId).emit("relay-input", { input });
+  });
+
   socket.on("relay-game-message", ({ roomId, message }) => {
     if (!roomId || !message) return;
     socket.to(roomId).emit("relay-game-message", { message });
   });
 
   socket.on("disconnect", () => {
-    if (waitingSocket?.id === socket.id) waitingSocket = null;
+    removeFromWaiting(socket.id);
+
     for (const roomId of socket.rooms) {
-      if (roomId !== socket.id) socket.to(roomId).emit("peer-disconnected");
+      if (roomId !== socket.id) {
+        socket.to(roomId).emit("peer-disconnected", { socketId: socket.id });
+      }
     }
+
     console.log("Jugador desconectado:", socket.id);
   });
 });
