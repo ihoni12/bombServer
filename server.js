@@ -14,7 +14,6 @@ const START_DELAY_MS = 3000;
 let waitingPlayers = [];
 let waitingTimer = null;
 let waitingStartedAt = null;
-let lastPlayerJoinedAt = null;
 
 function canHaveBox(x, y) {
   const isBorder = x === 0 || y === 0 || x === COLS - 1 || y === ROWS - 1;
@@ -104,18 +103,12 @@ function handleHealth(req, res) {
     message: "Servidor online funcionando correctamente.",
     mode: "Socket.IO + WebRTC signaling",
     waitingPlayers: waitingPlayers.length,
-    lastPlayerJoinedAt,
-    autoStartAt: lastPlayerJoinedAt ? lastPlayerJoinedAt + WAIT_TIME_MS : null,
     maxPlayers: MAX_PLAYERS,
     minPlayers: MIN_PLAYERS,
   });
 }
 
 function getWaitingPayload(extra = {}) {
-  const now = Date.now();
-  const autoStartAt = lastPlayerJoinedAt ? lastPlayerJoinedAt + WAIT_TIME_MS : null;
-  const remainingMs = autoStartAt ? Math.max(0, autoStartAt - now) : WAIT_TIME_MS;
-
   return {
     playersWaiting: waitingPlayers.length,
     playersCount: waitingPlayers.length,
@@ -123,13 +116,10 @@ function getWaitingPayload(extra = {}) {
     minPlayers: MIN_PLAYERS,
     waitSeconds: WAIT_TIME_MS / 1000,
     waitingStartedAt,
-    lastPlayerJoinedAt,
-    autoStartAt,
-    remainingMs,
-    remainingSeconds: Math.ceil(remainingMs / 1000),
+    autoStartAt: waitingStartedAt ? waitingStartedAt + WAIT_TIME_MS : null,
     message:
       waitingPlayers.length >= MIN_PLAYERS
-        ? "Hay suficientes jugadores. Si no entra nadie más, la partida empieza en breve."
+        ? "Ya hay jugadores suficientes. La partida empezará pronto."
         : "Esperando al menos 2 jugadores para comenzar.",
     ...extra,
   };
@@ -144,7 +134,6 @@ function clearWaitingTimerIfNeeded() {
     if (waitingTimer) clearTimeout(waitingTimer);
     waitingTimer = null;
     waitingStartedAt = null;
-    lastPlayerJoinedAt = null;
   }
 }
 
@@ -196,12 +185,10 @@ function startMatch(players) {
 
   if (waitingPlayers.length > 0) {
     waitingStartedAt = Date.now();
-    lastPlayerJoinedAt = Date.now();
     emitWaitingRoomUpdate();
-    resetWaitingTimer();
+    startWaitingTimer();
   } else {
     waitingStartedAt = null;
-    lastPlayerJoinedAt = null;
   }
 }
 
@@ -212,18 +199,9 @@ function tryStartByMaxPlayers() {
   }
 }
 
-function resetWaitingTimer() {
-  if (waitingTimer) clearTimeout(waitingTimer);
-  waitingTimer = null;
-  startWaitingTimer();
-}
-
 function startWaitingTimer() {
   if (waitingTimer || waitingPlayers.length === 0) return;
   if (!waitingStartedAt) waitingStartedAt = Date.now();
-  if (!lastPlayerJoinedAt) lastPlayerJoinedAt = Date.now();
-
-  const delay = Math.max(0, lastPlayerJoinedAt + WAIT_TIME_MS - Date.now());
 
   waitingTimer = setTimeout(() => {
     waitingTimer = null;
@@ -238,9 +216,10 @@ function startWaitingTimer() {
       socket.emit("waiting-for-player", getWaitingPayload());
     });
 
+    waitingStartedAt = Date.now();
     emitWaitingRoomUpdate();
     startWaitingTimer();
-  }, delay);
+  }, WAIT_TIME_MS);
 }
 
 const httpServer = http.createServer((req, res) => {
@@ -269,7 +248,6 @@ io.on("connection", (socket) => {
 
     waitingPlayers.push(socket);
     if (!waitingStartedAt) waitingStartedAt = Date.now();
-    lastPlayerJoinedAt = Date.now();
 
     socket.emit("waiting-for-player", getWaitingPayload({
       message: "Entraste a la sala de espera. Buscando jugadores...",
@@ -278,11 +256,8 @@ io.on("connection", (socket) => {
     emitWaitingRoomUpdate();
     console.log(`Sala de espera: ${waitingPlayers.length}/${MAX_PLAYERS}`);
 
-    if (waitingPlayers.length >= MAX_PLAYERS) {
-      tryStartByMaxPlayers();
-    } else {
-      resetWaitingTimer();
-    }
+    tryStartByMaxPlayers();
+    startWaitingTimer();
   });
 
   socket.on("cancel-waiting", () => {
