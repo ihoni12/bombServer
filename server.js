@@ -8,8 +8,25 @@ const COLS = 11;
 
 const MAX_PLAYERS = 4;
 const MIN_PLAYERS = 2;
-const WAIT_TIME_MS = 3000;
+const WAIT_TIME_MS = 30000;
 const START_DELAY_MS = 3000;
+
+
+function normalizeProfile(profile = {}) {
+  const name = String(profile.name || "Jugador").trim().slice(0, 18) || "Jugador";
+  const photo = typeof profile.photo === "string" && profile.photo.startsWith("data:image/")
+    ? profile.photo.slice(0, 350000)
+    : "";
+
+  return { name, photo };
+}
+
+function publicWaitingPlayers() {
+  return waitingPlayers.map((socket) => ({
+    socketId: socket.id,
+    profile: normalizeProfile(socket.playerProfile),
+  }));
+}
 
 let waitingPlayers = [];
 let waitingTimer = null;
@@ -31,17 +48,26 @@ function canHaveBox(x, y) {
 function chooseRandomBoxContent() {
   const roll = Math.random() * 100;
 
-  if (roll < 45) return "vacio";
-  if (roll < 58) return "life";
-  if (roll < 68) return "range";
-  if (roll < 76) return "speed";
-  if (roll < 84) return "bulletDamage";
-  if (roll < 91) return "bomb";
-  if (roll < 96) return "shield100";
-  if (roll < 98) return "shield5";
-  if (roll < 99) return "pushBomb";
-  if (roll < 99.6) return "fiveShots";
-  return "playerShot";
+ if (roll < 40) return "vacio";
+
+// 25%
+if (roll < 46.25) return "bomb";
+if (roll < 52.5) return "bulletDamage";
+if (roll < 58.75) return "speed";
+if (roll < 65) return "life";
+
+// 20%
+if (roll < 70) return "shield5";
+if (roll < 75) return "shield100";
+if (roll < 80) return "range";
+if (roll < 85) return "pushBomb";
+
+// 14%
+if (roll < 92) return "playerShot";
+if (roll < 99) return "fiveShots";
+
+// 1%
+return "nuke";
 }
 
 function createBoxContents() {
@@ -71,6 +97,7 @@ function buildCornerPlayers(sockets) {
     corner: index,
     socketId: socket.id,
     peerId: socket.id,
+    profile: normalizeProfile(socket.playerProfile),
   }));
 }
 
@@ -127,6 +154,7 @@ function getWaitingPayload(extra = {}) {
     autoStartAt,
     remainingMs,
     remainingSeconds: Math.ceil(remainingMs / 1000),
+    players: publicWaitingPlayers(),
     message:
       waitingPlayers.length >= MIN_PLAYERS
         ? "Hay suficientes jugadores. Si no entra nadie más, la partida empieza en breve."
@@ -255,12 +283,14 @@ const httpServer = http.createServer((req, res) => {
 
 const io = new Server(httpServer, {
   cors: { origin: "*", methods: ["GET", "POST"] },
+  maxHttpBufferSize: 2e6,
 });
 
 io.on("connection", (socket) => {
   console.log("Jugador conectado:", socket.id);
 
-  socket.on("want-to-play", () => {
+  socket.on("want-to-play", (data = {}) => {
+    socket.playerProfile = normalizeProfile(data.profile);
     const alreadyWaiting = waitingPlayers.some((s) => s.id === socket.id);
     if (alreadyWaiting) {
       socket.emit("waiting-for-player", getWaitingPayload());
