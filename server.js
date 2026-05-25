@@ -8,7 +8,8 @@ const COLS = 11;
 
 const MAX_PLAYERS = 4;
 const MIN_PLAYERS = 2;
-const WAIT_TIME_MS = 30000;
+//cambier despues de que termines
+const WAIT_TIME_MS = 3000;
 const START_DELAY_MS = 3000;
 
 let waitingPlayers = [];
