@@ -8,8 +8,7 @@ const COLS = 11;
 
 const MAX_PLAYERS = 4;
 const MIN_PLAYERS = 2;
-//cambier despues de que termines
-const WAIT_TIME_MS = 3000;
+const WAIT_TIME_MS = 30000;
 const START_DELAY_MS = 3000;
 
 let waitingPlayers = [];
@@ -307,16 +306,6 @@ io.on("connection", (socket) => {
   socket.on("webrtc-ice", ({ roomId, candidate }) => {
     if (!roomId || !candidate) return;
     socket.to(roomId).emit("webrtc-ice", { from: socket.id, candidate });
-  });
-
-  socket.on("relay-input", ({ roomId, input }) => {
-    if (!roomId || !input) return;
-    socket.to(roomId).emit("relay-input", { input });
-  });
-
-  socket.on("relay-game-message", ({ roomId, message }) => {
-    if (!roomId || !message) return;
-    socket.to(roomId).emit("relay-game-message", { message });
   });
 
   socket.on("disconnect", () => {
