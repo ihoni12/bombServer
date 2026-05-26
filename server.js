@@ -17,14 +17,24 @@ function normalizeProfile(profile = {}) {
   const photo = typeof profile.photo === "string" && profile.photo.startsWith("data:image/")
     ? profile.photo.slice(0, 350000)
     : "";
+  const cleanSelectedSkins = (profile.stats?.selectedSkins && typeof profile.stats.selectedSkins === "object")
+    ? {
+        player: String(profile.stats.selectedSkins.player || "classic").slice(0, 24),
+        bomb: String(profile.stats.selectedSkins.bomb || "classic").slice(0, 24),
+        bullet: String(profile.stats.selectedSkins.bullet || "classic").slice(0, 24),
+        gun: String(profile.stats.selectedSkins.gun || "classic").slice(0, 24),
+      }
+    : { player: "classic", bomb: "classic", bullet: "classic", gun: "classic" };
+
   const stats = profile.stats && typeof profile.stats === "object"
     ? {
         level: Math.max(1, Number(profile.stats.level || 1)),
         wins: Math.max(0, Number(profile.stats.wins || 0)),
         kills: Math.max(0, Number(profile.stats.kills || 0)),
         matches: Math.max(0, Number(profile.stats.matches || 0)),
+        selectedSkins: cleanSelectedSkins,
       }
-    : { level: 1, wins: 0, kills: 0, matches: 0 };
+    : { level: 1, wins: 0, kills: 0, matches: 0, selectedSkins: cleanSelectedSkins };
 
   return { name, photo, stats };
 }
@@ -119,14 +129,18 @@ function buildCornerPlayers(sockets) {
 
 function createMatch(sockets) {
   const serverNow = Date.now();
+  const matchSeed = crypto.randomBytes(8).toString("hex");
 
+  // El servidor SOLO crea la sala, el seed inicial y la info básica.
+  // NO recibe ni reenvía movimiento, bombas, balas, vida, skins durante la partida.
+  // Después de match-found, el juego viaja por WebRTC DataChannel entre usuarios.
   return {
     matchId: crypto.randomUUID(),
     serverNow,
     startAt: serverNow + START_DELAY_MS,
     playersCount: sockets.length,
     playersByCorner: buildCornerPlayers(sockets),
-    boxContents: createBoxContents(),
+    matchSeed,
   };
 }
 
@@ -377,6 +391,13 @@ io.on("connection", (socket) => {
     if (!roomId || !candidate) return;
     socket.to(roomId).emit("webrtc-ice", { from: socket.id, candidate });
   });
+
+  // Seguridad/claridad: aunque un cliente viejo intente mandar datos del juego
+  // por Socket.IO, el servidor NO los reenvía. La partida va solo P2P.
+  socket.on("game-input", () => {});
+  socket.on("game-state", () => {});
+  socket.on("state-request", () => {});
+  socket.on("state-response", () => {});
 
   socket.on("disconnect", () => {
     removeFromWaiting(socket.id);
