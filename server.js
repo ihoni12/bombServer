@@ -17,15 +17,31 @@ function normalizeProfile(profile = {}) {
   const photo = typeof profile.photo === "string" && profile.photo.startsWith("data:image/")
     ? profile.photo.slice(0, 350000)
     : "";
+  const stats = profile.stats && typeof profile.stats === "object"
+    ? {
+        level: Math.max(1, Number(profile.stats.level || 1)),
+        wins: Math.max(0, Number(profile.stats.wins || 0)),
+        kills: Math.max(0, Number(profile.stats.kills || 0)),
+        matches: Math.max(0, Number(profile.stats.matches || 0)),
+      }
+    : { level: 1, wins: 0, kills: 0, matches: 0 };
 
-  return { name, photo };
+  return { name, photo, stats };
 }
 
-function publicWaitingPlayers() {
-  return waitingPlayers.map((socket) => ({
-    socketId: socket.id,
-    profile: normalizeProfile(socket.playerProfile),
-  }));
+function normalizeRoomCode(roomCode = "") {
+  const clean = String(roomCode || "PUBLIC").trim().toUpperCase().replace(/[^A-Z0-9-]/g, "").slice(0, 12);
+  return clean || "PUBLIC";
+}
+
+function publicWaitingPlayers(roomCode = null) {
+  return waitingPlayers
+    .filter((socket) => !roomCode || socket.roomCode === roomCode)
+    .map((socket) => ({
+      socketId: socket.id,
+      profile: normalizeProfile(socket.playerProfile),
+      roomCode: socket.roomCode || "PUBLIC",
+    }));
 }
 
 let waitingPlayers = [];
@@ -138,14 +154,17 @@ function handleHealth(req, res) {
   });
 }
 
-function getWaitingPayload(extra = {}) {
+function getWaitingPayload(extra = {}, roomCode = "PUBLIC") {
   const now = Date.now();
   const autoStartAt = lastPlayerJoinedAt ? lastPlayerJoinedAt + WAIT_TIME_MS : null;
   const remainingMs = autoStartAt ? Math.max(0, autoStartAt - now) : WAIT_TIME_MS;
 
+  const playersInRoom = waitingPlayers.filter((socket) => socket.roomCode === roomCode);
+
   return {
-    playersWaiting: waitingPlayers.length,
-    playersCount: waitingPlayers.length,
+    roomCode,
+    playersWaiting: playersInRoom.length,
+    playersCount: playersInRoom.length,
     maxPlayers: MAX_PLAYERS,
     minPlayers: MIN_PLAYERS,
     waitSeconds: WAIT_TIME_MS / 1000,
@@ -154,17 +173,22 @@ function getWaitingPayload(extra = {}) {
     autoStartAt,
     remainingMs,
     remainingSeconds: Math.ceil(remainingMs / 1000),
-    players: publicWaitingPlayers(),
+    players: publicWaitingPlayers(roomCode),
     message:
-      waitingPlayers.length >= MIN_PLAYERS
+      playersInRoom.length >= MIN_PLAYERS
         ? "Hay suficientes jugadores. Si no entra nadie más, la partida empieza en breve."
         : "Esperando al menos 2 jugadores para comenzar.",
     ...extra,
   };
 }
 
-function emitWaitingRoomUpdate(extra = {}) {
-  io.emit("waiting-room-update", getWaitingPayload(extra));
+function emitWaitingRoomUpdate(extra = {}, roomCode = null) {
+  const rooms = roomCode ? [roomCode] : [...new Set(waitingPlayers.map((s) => s.roomCode || "PUBLIC"))];
+  for (const code of rooms) {
+    for (const socket of waitingPlayers.filter((s) => (s.roomCode || "PUBLIC") === code)) {
+      socket.emit("waiting-room-update", getWaitingPayload(extra, code));
+    }
+  }
 }
 
 function clearWaitingTimerIfNeeded() {
@@ -177,12 +201,14 @@ function clearWaitingTimerIfNeeded() {
 }
 
 function removeFromWaiting(socketId) {
+  const socket = waitingPlayers.find((s) => s.id === socketId);
+  const roomCode = socket?.roomCode || "PUBLIC";
   const before = waitingPlayers.length;
   waitingPlayers = waitingPlayers.filter((s) => s.id !== socketId);
 
   if (before !== waitingPlayers.length) {
     clearWaitingTimerIfNeeded();
-    emitWaitingRoomUpdate();
+    emitWaitingRoomUpdate({}, roomCode);
   }
 }
 
@@ -233,9 +259,10 @@ function startMatch(players) {
   }
 }
 
-function tryStartByMaxPlayers() {
-  if (waitingPlayers.length >= MAX_PLAYERS) {
-    const players = waitingPlayers.slice(0, MAX_PLAYERS);
+function tryStartByMaxPlayers(roomCode = "PUBLIC") {
+  const playersInRoom = waitingPlayers.filter((s) => s.roomCode === roomCode);
+  if (playersInRoom.length >= MAX_PLAYERS) {
+    const players = playersInRoom.slice(0, MAX_PLAYERS);
     startMatch(players);
   }
 }
@@ -256,14 +283,14 @@ function startWaitingTimer() {
   waitingTimer = setTimeout(() => {
     waitingTimer = null;
 
-    if (waitingPlayers.length >= MIN_PLAYERS) {
+    if (playersInRoom.length >= MIN_PLAYERS) {
       const players = waitingPlayers.slice(0, MAX_PLAYERS);
       startMatch(players);
       return;
     }
 
     waitingPlayers.forEach((socket) => {
-      socket.emit("waiting-for-player", getWaitingPayload());
+      socket.emit("waiting-for-player", getWaitingPayload({}, socket.roomCode));
     });
 
     emitWaitingRoomUpdate();
@@ -291,9 +318,10 @@ io.on("connection", (socket) => {
 
   socket.on("want-to-play", (data = {}) => {
     socket.playerProfile = normalizeProfile(data.profile);
+    socket.roomCode = normalizeRoomCode(data.roomCode);
     const alreadyWaiting = waitingPlayers.some((s) => s.id === socket.id);
     if (alreadyWaiting) {
-      socket.emit("waiting-for-player", getWaitingPayload());
+      socket.emit("waiting-for-player", getWaitingPayload({}, socket.roomCode));
       return;
     }
 
@@ -303,13 +331,13 @@ io.on("connection", (socket) => {
 
     socket.emit("waiting-for-player", getWaitingPayload({
       message: "Entraste a la sala de espera. Buscando jugadores...",
-    }));
+    }, socket.roomCode));
 
-    emitWaitingRoomUpdate();
+    emitWaitingRoomUpdate({}, socket.roomCode);
     console.log(`Sala de espera: ${waitingPlayers.length}/${MAX_PLAYERS}`);
 
-    if (waitingPlayers.length >= MAX_PLAYERS) {
-      tryStartByMaxPlayers();
+    if (waitingPlayers.filter((s) => s.roomCode === socket.roomCode).length >= MAX_PLAYERS) {
+      tryStartByMaxPlayers(socket.roomCode);
     } else {
       resetWaitingTimer();
     }
