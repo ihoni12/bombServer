@@ -283,14 +283,26 @@ function startWaitingTimer() {
   waitingTimer = setTimeout(() => {
     waitingTimer = null;
 
-    if (playersInRoom.length >= MIN_PLAYERS) {
-      const players = waitingPlayers.slice(0, MAX_PLAYERS);
-      startMatch(players);
-      return;
+    // Agrupamos por sala. Antes acá decía `playersInRoom`,
+    // pero esa variable no existía dentro de esta función y rompía el server.
+    const roomCodes = [...new Set(waitingPlayers.map((socket) => socket.roomCode || "PUBLIC"))];
+
+    for (const code of roomCodes) {
+      const playersInRoom = waitingPlayers.filter((socket) => (socket.roomCode || "PUBLIC") === code);
+
+      if (playersInRoom.length >= MAX_PLAYERS) {
+        startMatch(playersInRoom.slice(0, MAX_PLAYERS));
+        return;
+      }
+
+      if (playersInRoom.length >= MIN_PLAYERS) {
+        startMatch(playersInRoom.slice(0, MAX_PLAYERS));
+        return;
+      }
     }
 
     waitingPlayers.forEach((socket) => {
-      socket.emit("waiting-for-player", getWaitingPayload({}, socket.roomCode));
+      socket.emit("waiting-for-player", getWaitingPayload({}, socket.roomCode || "PUBLIC"));
     });
 
     emitWaitingRoomUpdate();
