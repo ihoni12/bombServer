@@ -161,6 +161,7 @@ function handleHealth(req, res) {
     message: "Servidor online funcionando correctamente.",
     mode: "Socket.IO + WebRTC signaling",
     waitingPlayers: waitingPlayers.length,
+    serverNow: Date.now(),
     lastPlayerJoinedAt,
     autoStartAt: lastPlayerJoinedAt ? lastPlayerJoinedAt + WAIT_TIME_MS : null,
     maxPlayers: MAX_PLAYERS,
@@ -177,6 +178,7 @@ function getWaitingPayload(extra = {}, roomCode = "PUBLIC") {
 
   return {
     roomCode,
+    serverNow: now,
     playersWaiting: playersInRoom.length,
     playersCount: playersInRoom.length,
     maxPlayers: MAX_PLAYERS,
@@ -244,6 +246,7 @@ function startMatch(players) {
       roomId,
       playersCount: players.length,
       maxPlayers: MAX_PLAYERS,
+      serverNow: Date.now(),
       startAt: match.startAt,
       message: "Partida encontrada. Preparando el inicio...",
     });
@@ -341,6 +344,17 @@ const io = new Server(httpServer, {
 
 io.on("connection", (socket) => {
   console.log("Jugador conectado:", socket.id);
+
+  // Reloj central para los clientes.
+  // El cliente calcula su desfase local y deja de depender del reloj de su PC.
+  socket.on("time-sync", (data = {}, callback) => {
+    if (typeof callback === "function") {
+      callback({
+        clientSentAt: data.clientSentAt || null,
+        serverNow: Date.now(),
+      });
+    }
+  });
 
   socket.on("want-to-play", (data = {}) => {
     socket.playerProfile = normalizeProfile(data.profile);
